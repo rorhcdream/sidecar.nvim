@@ -4,7 +4,11 @@
 -- Run: nvim --headless -l tests/scroll_test.lua
 package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 local cc = require("sidecar")
-cc.setup({ tools = { t = { cmd = { "sh", "-c", "seq 1 500; sleep 30" } } }, active = "t" })
+cc.setup({
+  tools = { t = { cmd = { "sh", "-c", "seq 1 500; sleep 30" } } },
+  active = "t",
+  remember_active = false,
+})
 
 cc.toggle("t") -- opens + focuses the terminal
 vim.wait(3000, function() return vim.fn.line("$") > 200 end, 50)
