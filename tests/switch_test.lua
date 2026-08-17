@@ -12,6 +12,7 @@ cc.setup({
   },
   active = "a",
   remember_active = false,
+  prompt_delay_ms = 0,
 })
 
 local source_win = vim.api.nvim_get_current_win()
@@ -35,14 +36,17 @@ assert(vim.api.nvim_get_current_win() == source_win, "collapsed switch reopened 
 cc.toggle()
 assert(vim.api.nvim_get_current_buf() == b_buf, "shared toggle did not reopen the selected terminal")
 
--- Active b is visible while running a is hidden. A context send reopens a, but
--- focus must return to active b rather than whichever terminal was reopened.
+-- Active b is visible while running a is hidden. Context is sent only to b;
+-- a remains untouched and focus moves to the active agent for review.
 vim.api.nvim_set_current_win(source_win)
-local sent = 0
+local sent = {}
 local chan_send = vim.api.nvim_chan_send
-vim.api.nvim_chan_send = function() sent = sent + 1 end
+vim.api.nvim_chan_send = function(jobid, payload)
+  sent[#sent + 1] = { jobid = jobid, payload = payload }
+end
 cc.add_buffer()
 vim.api.nvim_chan_send = chan_send
-assert(sent == 2, "buffer reference was not broadcast to both running tools")
+assert(#sent == 1, "buffer reference was sent to more than the active tool")
+assert(sent[1].jobid == vim.bo[b_buf].channel, "buffer reference was not sent to the active tool")
 assert(vim.api.nvim_get_current_buf() == b_buf, "context send focused a non-active terminal")
 print("ok")

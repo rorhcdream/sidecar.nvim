@@ -9,7 +9,12 @@ local source_buf = vim.api.nvim_get_current_buf()
 vim.api.nvim_buf_set_name(source_buf, vim.fn.getcwd() .. "/tests/example.lua")
 vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "one", "two", "three", "four", "five" })
 
-cc.setup({ tools = { t = { cmd = { "sh", "-c", "sleep 30" } } }, active = "t", remember_active = false })
+cc.setup({
+  tools = { t = { cmd = { "sh", "-c", "sleep 30" } } },
+  active = "t",
+  remember_active = false,
+  prompt_delay_ms = 0,
+})
 cc.toggle("t") -- open + focus
 cc.toggle("t") -- hide, returning to the source window
 assert(vim.api.nvim_get_current_win() == source_win, "toggle did not return to source window")

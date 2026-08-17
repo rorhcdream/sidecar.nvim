@@ -2,7 +2,7 @@
 
 Keep a CLI coding agent one keystroke away in a Neovim terminal split. Toggle the
 active agent with one key, switch agents with another, and push the current file
-or a selected line range into whichever agents are running. Terminal-only — no
+or a selected line range into that active agent. Terminal-only — no
 websocket/MCP protocol — so any CLI behaves the same.
 
 Adapted from [`coder/claudecode.nvim`](https://github.com/coder/claudecode.nvim)'s
@@ -16,14 +16,13 @@ focus-scroll-jump and crash-hidden-error bugs.
 | `,ac` | n / t | Toggle / focus the active agent (**claude** or **codex**)                      |
 | `,ar` | n / t | Exit and restart the active agent in a fresh terminal                         |
 | `,at` | n / t | Switch the active agent; replace the panel when it is visible                  |
-| `,ab` | n     | Send file (`@path`) to every running agent — node under cursor in nvim-tree/oil, else current buffer |
-| `,as` | v     | Send the selected file + line range (`@path#start-end`) to every running agent |
+| `,ab` | n     | Send file (`@path`) to the active agent — node under cursor in nvim-tree/oil, else current buffer |
+| `,as` | v     | Send the selected file + line range (`@path#start-end`) to the active agent |
 
-`,ab`/`,as` broadcast to all running agents at once (if only one is running, just
-that one; if none are running, the default agent is started). Both reopen hidden
-agent terminals and focus the active one. They never auto-submit — text lands in
-the prompt so you can review and hit enter yourself. Control characters in
-filenames are stripped so crafted paths can't sneak a submit through.
+`,ab`/`,as` open or focus the active agent and send only to it; other running
+agents are untouched. They never auto-submit — text lands in the prompt so you
+can review and hit enter yourself. Control characters in filenames are stripped
+so crafted paths can't sneak a submit through.
 
 The agent last selected through Sidecar is remembered per working directory and
 restored the next time Sidecar loads there. If Sidecar has no state yet, it

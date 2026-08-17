@@ -1,7 +1,7 @@
 ---sidecar.nvim — run a CLI coding agent in a terminal split.
 ---
 ---One toggle key controls the active tool, and a switch key cycles tools.
----Add-buffer/send-selection broadcast to every running tool at once. Terminal-only:
+---Add-buffer/send-selection target only the active tool. Terminal-only:
 ---no websocket or MCP diff protocol, so it works identically for both CLIs.
 ---@module 'sidecar'
 
@@ -38,8 +38,8 @@ M.config = {
     refresh = "<leader>ar", -- stop and restart the active tool
     switch = "<leader>at", -- cycle the active tool; replace its panel if visible
     toggles = {}, -- optional direct per-tool toggle keys
-    add_buffer = "<leader>ab", -- send current file to every running tool
-    send = "<leader>as", -- (visual) send selection to every running tool
+    add_buffer = "<leader>ab", -- send current file to the active tool
+    send = "<leader>as", -- (visual) send selection to the active tool
   },
 }
 -- Scrolling the CLIs' history: neither Claude nor Codex enables terminal mouse
@@ -747,68 +747,19 @@ local function tree_file()
   return nil
 end
 
---- Tools with a live terminal (running job), regardless of whether their window
---- is currently visible. Sorted for deterministic ordering.
----@return string[]
-local function running_tools()
-  local out = {}
-  for name in pairs(M.config.tools) do
-    local t = terms[name]
-    if t and t.jobid and vim.api.nvim_buf_is_valid(t.bufnr) then
-      out[#out + 1] = name
-    end
-  end
-  table.sort(out)
-  return out
-end
-
---- Send a payload to every running tool. If none are running, open the default
---- tool and send to just that one, so the shortcut is never a no-op. Optionally
---- reopen hidden terminals and focus the active (or first) reopened tool.
+--- Send a payload only to the active tool. Open or focus its panel first so the
+--- inserted context is visible for review; other running tools are untouched.
 ---@param payload string
----@param reveal_hidden boolean|nil
-local function broadcast(payload, reveal_hidden)
-  local targets = running_tools()
-  if #targets == 0 then
-    persist_active(M.config.active)
-    local t = open(M.config.active, true) -- nothing open -> start the default tool
-    if t then
-      vim.api.nvim_chan_send(t.jobid, payload)
-    end
-    return
-  end
-
-  local reopened = {}
-  if reveal_hidden then
-    for _, name in ipairs(targets) do
-      local t = terms[name]
-      if not win_showing(t.bufnr) and open(name, false) then
-        reopened[#reopened + 1] = name
-      end
-    end
-  end
-
-  for _, name in ipairs(targets) do
-    vim.api.nvim_chan_send(terms[name].jobid, payload) -- send without stealing focus
-  end
-
-  if #reopened > 0 then
-    local t = terms[M.config.active]
-    local win = t and win_showing(t.bufnr)
-    if not win then
-      t = terms[reopened[1]]
-      win = win_showing(t.bufnr)
-    end
-    if win then
-      t.winid = win
-      focus_win(win, t.resume_insert)
-    end
+local function send_active(payload)
+  persist_active(M.config.active)
+  local t = open(M.config.active, true)
+  if t then
+    send_prompt(M.config.active, t, payload, false)
   end
 end
 
---- Send a file mention (`@path`) to every running tool. Uses the node under the
---- cursor in nvim-tree/oil, otherwise the current buffer's file. Hidden terminals
---- are reopened so the inserted reference is visible for review.
+--- Send a file mention (`@path`) to the active tool. Uses the node under the
+--- cursor in nvim-tree/oil, otherwise the current buffer's file.
 function M.add_buffer()
   local path = tree_file() or vim.fn.expand("%:.")
   if not path or path == "" then
@@ -816,11 +767,10 @@ function M.add_buffer()
     return
   end
   path = vim.fn.fnamemodify(path, ":.") -- relative to cwd
-  broadcast(M._mention(path), true)
+  send_active(M._mention(path))
 end
 
---- Send the selected file and inclusive line range to every running tool. Hidden
---- terminals are reopened so the inserted reference is visible for review.
+--- Send the selected file and inclusive line range to the active tool.
 function M.send_selection()
   local reference, err = visual_reference()
   if not reference then
@@ -829,7 +779,7 @@ function M.send_selection()
     end
     return
   end
-  broadcast(reference, true)
+  send_active(reference)
 end
 
 ---@param opts table|nil
@@ -893,10 +843,10 @@ function M.setup(opts)
     map("t", k.switch, M.switch, { desc = "Switch active tool" })
   end
   if k.add_buffer then
-    map("n", k.add_buffer, M.add_buffer, { desc = "Add buffer to open tools" })
+    map("n", k.add_buffer, M.add_buffer, { desc = "Add buffer to active tool" })
   end
   if k.send then
-    map("v", k.send, M.send_selection, { desc = "Send selection to open tools" })
+    map("v", k.send, M.send_selection, { desc = "Send selection to active tool" })
   end
 end
 
