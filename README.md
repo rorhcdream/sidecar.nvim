@@ -14,6 +14,7 @@ focus-scroll-jump and crash-hidden-error bugs.
 | Key   | Mode  | Action                                                                        |
 | ----- | ----- | ----------------------------------------------------------------------------- |
 | `,ac` | n / t | Toggle / focus the active agent (**claude** or **codex**)                      |
+| `,ar` | n / t | Exit and restart the active agent in a fresh terminal                         |
 | `,at` | n / t | Switch the active agent; replace the panel when it is visible                  |
 | `,ab` | n     | Send file (`@path`) to every running agent — node under cursor in nvim-tree/oil, else current buffer |
 | `,as` | v     | Send the selected file + line range (`@path#start-end`) to every running agent |
@@ -52,6 +53,7 @@ run non-fullscreen, so their output lives in Neovim's scrollback.
 {
   "rorhcdream/sidecar.nvim",
   event = "VeryLazy",
+  cmd = { "Sidecar", "SidecarRefresh", "SidecarSwitch", "SidecarAdd", "SidecarPrompt", "SidecarPromptFile" },
   opts = {
     tools = {
       claude = { cmd = "~/.local/bin/claude" },
@@ -61,6 +63,34 @@ run non-fullscreen, so their output lives in Neovim's scrollback.
   config = function(_, opts) require("sidecar").setup(opts) end,
 }
 ```
+
+Including `cmd` makes the commands available early enough for `nvim -c`, while
+`event = "VeryLazy"` still loads Sidecar normally during interactive startup.
+
+## Task-start prompts
+
+Open the active agent with inline prompt text:
+
+```sh
+nvim -c 'SidecarPrompt Review this task before making changes'
+```
+
+Or pass a prompt file through the environment, which avoids quoting its path or
+contents inside the Ex command:
+
+```sh
+TASK_PROMPT_FILE=/path/to/task-prompt.md \
+  nvim -c 'SidecarPromptFile! $TASK_PROMPT_FILE'
+```
+
+`SidecarPrompt` and `SidecarPromptFile` open and focus the active agent. Without
+`!`, text is left in the input for review; with `!`, Sidecar submits it. Prompt
+files are sent as bracketed paste so multiline content remains a single prompt.
+On a fresh terminal, Sidecar waits for the configured initialization delay before
+sending; an already-running agent receives the prompt immediately. Submission
+uses a separate, slightly delayed Enter so the CLI does not mistake it for a
+trailing pasted newline. This makes the file form the recommended task-start
+hook for generated prompts.
 
 ## Config defaults
 
@@ -75,9 +105,12 @@ require("sidecar").setup({
   },
   split_side = "right",   -- "right" | "left"
   split_width = 0.40,     -- fraction of columns
+  prompt_delay_ms = 3000, -- delay prompt delivery while a fresh CLI initializes
+  prompt_submit_delay_ms = 100, -- delay Enter until the CLI leaves paste mode
   file_mention = "@%s ",  -- how ,ab/,as reference files and line ranges
   keymaps = {
     toggle = "<leader>ac", -- toggle the active agent
+    refresh = "<leader>ar", -- exit and restart the active agent
     switch = "<leader>at", -- cycle agents; replace the panel if visible
     toggles = {},           -- optional direct per-agent toggle keys
     add_buffer = "<leader>ab",
@@ -113,4 +146,7 @@ nvim --headless -l tests/send_selection_test.lua # line reference + reveal on se
 nvim --headless -l tests/switch_test.lua      # shared toggle + agent switching
 nvim --headless -l tests/remember_active_test.lua # per-directory active agent
 nvim --headless -l tests/history_detection_test.lua # history fallback precedence
+nvim --headless -l tests/resume_test.lua      # first-launch session resume
+nvim --headless -l tests/prompt_test.lua      # startup prompt + prompt-file commands
+nvim --headless -l tests/refresh_test.lua     # restart replaces terminal job + buffer
 ```

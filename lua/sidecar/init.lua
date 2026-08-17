@@ -30,9 +30,12 @@ M.config = {
   },
   split_side = "right", -- "right" | "left"
   split_width = 0.40, -- fraction of columns
+  prompt_delay_ms = 3000, -- let a freshly launched CLI initialize before sending a prompt
+  prompt_submit_delay_ms = 100, -- let the CLI leave paste mode before pressing Enter
   file_mention = "@%s ", -- how ,ab/,as reference files and selected line ranges
   keymaps = {
     toggle = "<leader>ac", -- open/focus/collapse the active tool
+    refresh = "<leader>ar", -- stop and restart the active tool
     switch = "<leader>at", -- cycle the active tool; replace its panel if visible
     toggles = {}, -- optional direct per-tool toggle keys
     add_buffer = "<leader>ab", -- send current file to every running tool
@@ -402,7 +405,9 @@ local function open(tool, focus)
     on_exit = function(exited_jobid, code)
       vim.schedule(function()
         local cur = terms[tool]
-        if not cur then
+        -- A refresh can replace this tool's terminal before the old job's exit
+        -- callback runs. Never let that stale callback tear down the new job.
+        if not cur or cur.jobid ~= exited_jobid then
           return
         end
         terms[tool] = nil
@@ -435,7 +440,7 @@ local function open(tool, focus)
   -- Unlisted, like other terminal toggles: keeps the agent out of bufferlines
   -- and out of "delete all buffers" sweeps, which only walk listed buffers.
   vim.bo[bufnr].buflisted = false
-  t = { bufnr = bufnr, winid = winid, jobid = jobid }
+  t = { bufnr = bufnr, winid = winid, jobid = jobid, started_at = vim.uv.hrtime() / 1000000 }
   terms[tool] = t
 
   if focus then
@@ -500,6 +505,179 @@ function M.focus(tool)
     persist_active(M.config.active)
   end
   open(tool or M.config.active, true)
+end
+
+--- Stop and discard a tool's terminal, then launch it again in a fresh split.
+---@param tool string|nil defaults to the active tool
+function M.refresh(tool)
+  if tool then
+    if not select_tool(tool) then
+      vim.notify("sidecar: unknown tool '" .. tostring(tool) .. "'", vim.log.levels.ERROR)
+      return
+    end
+  elseif M.config.tools[M.config.active] then
+    persist_active(M.config.active)
+  end
+  tool = tool or M.config.active
+
+  local t = terms[tool]
+  if t then
+    -- Detach before stopping the job. Its asynchronous exit callback then sees
+    -- stale state and cannot close the replacement terminal opened below.
+    terms[tool] = nil
+    if t.prompt_timer then
+      local timer = t.prompt_timer
+      t.prompt_timer = nil
+      pcall(function()
+        timer:stop()
+        if not timer:is_closing() then
+          timer:close()
+        end
+      end)
+    end
+    hide(t)
+    if t.jobid then
+      pcall(vim.fn.jobstop, t.jobid)
+    end
+    if t.bufnr and vim.api.nvim_buf_is_valid(t.bufnr) then
+      pcall(vim.api.nvim_buf_delete, t.bufnr, { force = true })
+    end
+  end
+
+  open(tool, true)
+end
+
+local function current_terminal(tool, t)
+  return terms[tool] == t and vim.api.nvim_buf_is_valid(t.bufnr)
+end
+
+local function submit_delay(tool)
+  local spec = M.config.tools[tool] or {}
+  local delay = spec.prompt_submit_delay_ms
+  if delay == nil then
+    delay = M.config.prompt_submit_delay_ms
+  end
+  return math.max(0, tonumber(delay) or 0)
+end
+
+--- Deliver queued prompts in order. Enter is always a separate terminal write:
+--- when it shares a write with bracketed paste, Codex can treat it as a trailing
+--- pasted newline instead of a submit key.
+local function drain_prompt_queue(tool, t)
+  if not t.prompt_ready or t.prompt_sending or not current_terminal(tool, t) then
+    return
+  end
+  local entry = table.remove(t.prompt_queue, 1)
+  if not entry then
+    return
+  end
+
+  t.prompt_sending = true
+  vim.api.nvim_chan_send(t.jobid, entry.payload)
+  if not entry.submit then
+    t.prompt_sending = false
+    drain_prompt_queue(tool, t)
+    return
+  end
+
+  local delay = submit_delay(tool)
+  vim.defer_fn(function()
+    if not current_terminal(tool, t) then
+      return
+    end
+    vim.api.nvim_chan_send(t.jobid, "\r")
+    -- Give the CLI a moment to consume Enter before delivering another queued
+    -- prompt. This matters when several startup commands are issued together.
+    vim.defer_fn(function()
+      if not current_terminal(tool, t) then
+        return
+      end
+      t.prompt_sending = false
+      drain_prompt_queue(tool, t)
+    end, delay)
+  end, delay)
+end
+
+--- Queue until a freshly launched CLI has installed its input handler, then
+--- deliver in order. PTYs accept writes as soon as termopen() returns, which can
+--- otherwise race TUI initialization.
+---@param tool string
+---@param t table
+---@param payload string
+---@param submit boolean|nil
+local function send_prompt(tool, t, payload, submit)
+  t.prompt_queue = t.prompt_queue or {}
+  t.prompt_queue[#t.prompt_queue + 1] = { payload = payload, submit = submit }
+
+  local spec = M.config.tools[tool] or {}
+  local delay = spec.prompt_delay_ms
+  if delay == nil then
+    delay = M.config.prompt_delay_ms
+  end
+  delay = math.max(0, tonumber(delay) or 0)
+  local elapsed = t.started_at and (vim.uv.hrtime() / 1000000 - t.started_at) or delay
+  local remaining = math.ceil(delay - elapsed)
+  if t.prompt_ready or remaining <= 0 then
+    t.prompt_ready = true
+    drain_prompt_queue(tool, t)
+    return
+  end
+
+  if t.prompt_timer then
+    return
+  end
+  t.prompt_timer = vim.defer_fn(function()
+    t.prompt_timer = nil
+    if terms[tool] ~= t or not vim.api.nvim_buf_is_valid(t.bufnr) then
+      return
+    end
+    t.prompt_ready = true
+    drain_prompt_queue(tool, t)
+  end, remaining)
+end
+
+--- Open the selected tool and place text in its prompt.
+---@param prompt string
+---@param opts? { tool?: string, submit?: boolean }
+---@return boolean sent
+function M.prompt(prompt, opts)
+  opts = opts or {}
+  if type(prompt) ~= "string" or prompt == "" then
+    vim.notify("sidecar: prompt is empty", vim.log.levels.WARN)
+    return false
+  end
+
+  local tool = opts.tool or M.config.active
+  if opts.tool then
+    select_tool(opts.tool)
+  elseif M.config.tools[tool] then
+    persist_active(tool)
+  end
+  local t = open(tool, true)
+  if not t then
+    return false
+  end
+  send_prompt(tool, t, M._prompt_payload(prompt), opts.submit)
+  return true
+end
+
+--- Read a prompt file, open the selected tool, and place its contents in the
+--- prompt. Environment variables and `~` are expanded for task-start commands.
+---@param path string
+---@param opts? { tool?: string, submit?: boolean }
+---@return boolean sent
+function M.prompt_file(path, opts)
+  path = vim.fn.expand(path)
+  if path == "" or vim.fn.filereadable(path) ~= 1 then
+    vim.notify("sidecar: prompt file is not readable", vim.log.levels.WARN)
+    return false
+  end
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok then
+    vim.notify("sidecar: failed to read prompt file", vim.log.levels.WARN)
+    return false
+  end
+  return M.prompt(table.concat(lines, "\n"), opts)
 end
 
 --- Select the next configured tool. If the active tool's panel is visible,
@@ -672,7 +850,22 @@ function M.setup(opts)
     M.toggle(a.args ~= "" and a.args or nil)
   end, { nargs = "?", desc = "Toggle Claude/Codex terminal", force = true })
   vim.api.nvim_create_user_command("SidecarSwitch", M.switch, { desc = "Switch active tool", force = true })
+  vim.api.nvim_create_user_command("SidecarRefresh", function(a)
+    M.refresh(a.args ~= "" and a.args or nil)
+  end, { nargs = "?", desc = "Restart a tool in a fresh terminal", force = true })
   vim.api.nvim_create_user_command("SidecarAdd", M.add_buffer, { desc = "Add current buffer", force = true })
+  vim.api.nvim_create_user_command("SidecarPrompt", function(a)
+    M.prompt(a.args, { submit = a.bang })
+  end, { nargs = "+", bang = true, desc = "Open Sidecar with a prompt", force = true })
+  vim.api.nvim_create_user_command("SidecarPromptFile", function(a)
+    M.prompt_file(a.args, { submit = a.bang })
+  end, {
+    nargs = 1,
+    bang = true,
+    complete = "file",
+    desc = "Open Sidecar with a prompt file",
+    force = true,
+  })
 
   local k = M.config.keymaps
   local map = vim.keymap.set
@@ -690,6 +883,10 @@ function M.setup(opts)
   if k.toggle then
     map("n", k.toggle, function() M.toggle() end, { desc = "Toggle active tool" })
     map("t", k.toggle, function() M.toggle() end, { desc = "Toggle active tool" })
+  end
+  if k.refresh then
+    map("n", k.refresh, function() M.refresh() end, { desc = "Restart active tool" })
+    map("t", k.refresh, function() M.refresh() end, { desc = "Restart active tool" })
   end
   if k.switch then
     map("n", k.switch, M.switch, { desc = "Switch active tool" })
