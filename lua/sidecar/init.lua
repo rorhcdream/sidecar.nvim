@@ -9,6 +9,9 @@ local M = {}
 
 ---@class SidecarToolConfig
 ---@field cmd string|string[] Command to launch the CLI
+---@field resume_args? string[]|false Arguments used when matching session history exists
+---@field prompt_delay_ms? integer Delay before sending a prompt to a fresh terminal
+---@field prompt_submit_delay_ms? integer Delay between pasting a prompt and pressing Enter
 
 M.config = {
   ---@type table<string, SidecarToolConfig>
@@ -21,6 +24,7 @@ M.config = {
   state_dir = nil, -- defaults to stdpath("state")/sidecar.nvim
   history = {
     enabled = true, -- if no Sidecar state exists, infer claude/codex from session activity
+    resume = true, -- resume matching history the first time a terminal is launched
     claude_dir = nil, -- defaults to $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects
     codex_dir = nil, -- defaults to $CODEX_HOME/sessions or ~/.codex/sessions
   },
@@ -42,6 +46,11 @@ M.config = {
 
 -- Per-tool terminal state: terms[tool] = { bufnr, winid, jobid }
 local terms = {}
+
+local default_resume_args = {
+  claude = { "--continue" },
+  codex = { "resume", "--last" },
+}
 
 local function active_state_path()
   local dir = M.config.state_dir or (vim.fn.stdpath("state") .. "/sidecar.nvim")
@@ -165,25 +174,39 @@ local function latest_session_mtime(root, cwd, format)
   return nil
 end
 
+local function latest_tool_session_mtime(tool, cwd)
+  local history = M.config.history or {}
+  if history.enabled == false then
+    return nil
+  end
+
+  cwd = cwd or normalized_path(vim.fn.getcwd())
+  local home = vim.fn.expand("~")
+  if tool == "claude" then
+    local claude_config = vim.env.CLAUDE_CONFIG_DIR or (home .. "/.claude")
+    local claude_projects = history.claude_dir or (claude_config .. "/projects")
+    local encoded_cwd = cwd:gsub("[^%w]", "-")
+    local claude_project = claude_projects .. "/" .. encoded_cwd
+    -- Verify cwd inside each file because Claude's path encoding can collide.
+    local root = vim.fn.isdirectory(claude_project) == 1 and claude_project or claude_projects
+    return latest_session_mtime(root, cwd, "claude")
+  elseif tool == "codex" then
+    local codex_config = vim.env.CODEX_HOME or (home .. "/.codex")
+    local root = history.codex_dir or (codex_config .. "/sessions")
+    return latest_session_mtime(root, cwd, "codex")
+  end
+  return nil
+end
+
 local function detect_active_from_history()
   local history = M.config.history or {}
   if history.enabled == false or not M.config.tools.claude or not M.config.tools.codex then
     return false
   end
 
-  local home = vim.fn.expand("~")
-  local claude_config = vim.env.CLAUDE_CONFIG_DIR or (home .. "/.claude")
-  local codex_config = vim.env.CODEX_HOME or (home .. "/.codex")
   local cwd = normalized_path(vim.fn.getcwd())
-  local encoded_cwd = cwd:gsub("[^%w]", "-")
-  local claude_projects = history.claude_dir or (claude_config .. "/projects")
-  local claude_project = claude_projects .. "/" .. encoded_cwd
-  -- Verify cwd inside each file because Claude's path encoding can collide.
-  local claude_root = vim.fn.isdirectory(claude_project) == 1 and claude_project or claude_projects
-  local codex_root = history.codex_dir or (codex_config .. "/sessions")
-
-  local claude_mtime = latest_session_mtime(claude_root, cwd, "claude")
-  local codex_mtime = latest_session_mtime(codex_root, cwd, "codex")
+  local claude_mtime = latest_tool_session_mtime("claude", cwd)
+  local codex_mtime = latest_tool_session_mtime("codex", cwd)
   if not claude_mtime and not codex_mtime then
     return false
   end
@@ -230,6 +253,38 @@ function M._line_reference(path, start_line, end_line)
   start_line, end_line = math.min(start_line, end_line), math.max(start_line, end_line)
   local range = start_line == end_line and tostring(start_line) or ("%d-%d"):format(start_line, end_line)
   return M._mention(("%s#%s"):format(path, range))
+end
+
+--- Append trusted CLI arguments without changing whether the base command uses
+--- shell-string or argv-table form.
+---@param cmd string|string[]
+---@param args string[]
+---@return string|string[]
+function M._append_args(cmd, args)
+  if type(cmd) == "table" then
+    local out = vim.list_extend({}, cmd)
+    return vim.list_extend(out, args)
+  end
+  local escaped = {}
+  for _, arg in ipairs(args) do
+    escaped[#escaped + 1] = vim.fn.shellescape(arg)
+  end
+  return cmd .. " " .. table.concat(escaped, " ")
+end
+
+--- Format prompt text for terminal input. Multiline prompts use bracketed paste
+--- so their newlines remain part of the prompt instead of submitting fragments.
+--- Control characters other than tab/newline are removed so prompt files cannot
+--- break out of bracketed paste and inject terminal input.
+---@param prompt string
+---@return string
+function M._prompt_payload(prompt)
+  prompt = prompt:gsub("\r\n", "\n"):gsub("\r", "\n")
+  prompt = prompt:gsub("[%z\1-\8\11\12\14-\31\127]", "")
+  if prompt:find("\n", 1, true) then
+    prompt = "\27[200~" .. prompt .. "\27[201~"
+  end
+  return prompt
 end
 
 --- Terminal plumbing -----------------------------------------------------------
@@ -333,8 +388,18 @@ local function open(tool, focus)
   -- Fresh terminal.
   local winid = new_split()
   vim.cmd("enew")
-  local jobid = vim.fn.termopen(spec.cmd, {
-    on_exit = function(_, code)
+  local cmd = spec.cmd
+  local history = M.config.history or {}
+  local resume_args = spec.resume_args
+  if resume_args == nil then
+    resume_args = default_resume_args[tool]
+  end
+  if history.resume ~= false and resume_args and latest_tool_session_mtime(tool) then
+    cmd = M._append_args(cmd, resume_args)
+  end
+
+  local jobid = vim.fn.termopen(cmd, {
+    on_exit = function(exited_jobid, code)
       vim.schedule(function()
         local cur = terms[tool]
         if not cur then

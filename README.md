@@ -31,6 +31,12 @@ selects whichever agent was used more recently. This is best-effort because the
 CLIs do not expose a stable shared history API. Sidecar state filenames use a
 hash of the directory, so project paths are not written to the state file.
 
+On the first terminal launch, matching history is resumed automatically:
+`claude --continue` for Claude Code and `codex resume --last` for Codex. No
+history keeps the normal fresh-session command, and an already-running terminal
+is always reused. Set `history.resume = false` to disable automatic resume, or
+set a tool's `resume_args = false` to disable it for that tool only.
+
 **Scrolling** an agent's history is native: press your terminal-normal-mode key
 (e.g. `<C-\><C-n>`) then `k`/`j`, `<C-u>`/`<C-d>`, `gg`/`G`. Both Claude and Codex
 run non-fullscreen, so their output lives in Neovim's scrollback.
@@ -63,7 +69,10 @@ require("sidecar").setup({
   tools = { claude = { cmd = "claude" }, codex = { cmd = "codex" } },
   active = "claude",      -- default agent, opened when a send happens with none open
   remember_active = true, -- restore the last selected agent for this directory
-  history = { enabled = true }, -- otherwise infer from local Claude/Codex sessions
+  history = {
+    enabled = true, -- otherwise infer from local Claude/Codex sessions
+    resume = true,  -- resume matching history on the first terminal launch
+  },
   split_side = "right",   -- "right" | "left"
   split_width = 0.40,     -- fraction of columns
   file_mention = "@%s ",  -- how ,ab/,as reference files and line ranges
