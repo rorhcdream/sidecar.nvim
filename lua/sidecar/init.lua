@@ -335,15 +335,19 @@ end
 
 local function hide(t)
   if t.winid and vim.api.nvim_win_is_valid(t.winid) then
+    local was_current = vim.api.nvim_get_current_win() == t.winid
     -- Remember whether this terminal was actively accepting input. If output
     -- arrives while hidden, that intent is more important than the now-stale
     -- cursor/view coordinates captured below.
-    t.resume_insert = vim.api.nvim_get_current_win() == t.winid and vim.fn.mode() == "t"
+    t.resume_insert = was_current and vim.fn.mode() == "t"
     -- Remember scroll + cursor before dropping the window. winsaveview()
     -- captures topline, lnum and col, so re-showing can land on the exact same
     -- view instead of snapping to the bottom/input line when reading scrollback.
     t.view = vim.api.nvim_win_call(t.winid, vim.fn.winsaveview)
     vim.api.nvim_win_close(t.winid, false) -- keep buffer + job alive
+    if was_current and t.return_win and vim.api.nvim_win_is_valid(t.return_win) then
+      vim.api.nvim_set_current_win(t.return_win)
+    end
   end
   t.winid = nil
 end
@@ -381,6 +385,9 @@ local function open(tool, focus)
       end
     end
     if focus then
+      if orig ~= t.winid then
+        t.return_win = orig
+      end
       focus_win(t.winid, was_hidden and t.resume_insert)
     else
       vim.api.nvim_set_current_win(orig)
@@ -440,7 +447,7 @@ local function open(tool, focus)
   -- Unlisted, like other terminal toggles: keeps the agent out of bufferlines
   -- and out of "delete all buffers" sweeps, which only walk listed buffers.
   vim.bo[bufnr].buflisted = false
-  t = { bufnr = bufnr, winid = winid, jobid = jobid, started_at = vim.uv.hrtime() / 1000000 }
+  t = { bufnr = bufnr, winid = winid, jobid = jobid, return_win = orig, started_at = vim.uv.hrtime() / 1000000 }
   terms[tool] = t
 
   if focus then
@@ -489,6 +496,7 @@ function M.toggle(tool)
         hide(t) -- we're in it -> hide
       else
         t.winid = win
+        t.return_win = vim.api.nvim_get_current_win()
         focus_win(win) -- visible elsewhere -> focus
       end
       return

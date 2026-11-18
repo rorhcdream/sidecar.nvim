@@ -19,6 +19,8 @@ focus-scroll-jump and crash-hidden-error bugs.
 | `,ab` | n     | Send file (`@path`) to the active agent — node under cursor in nvim-tree/oil, else current buffer |
 | `,as` | v     | Send the selected file + line range (`@path#start-end`) to the active agent |
 
+Collapsing the agent returns focus to the window you opened or focused it from, preserving that window's cursor position. If that window has been closed, Neovim chooses a remaining window as usual.
+
 `,ab`/`,as` open or focus the active agent and send only to it; other running
 agents are untouched. They never auto-submit — text lands in the prompt so you
 can review and hit enter yourself. Control characters in filenames are stripped
@@ -141,6 +143,7 @@ nvim --headless -l tests/pure_test.lua        # text helpers
 nvim --headless -l tests/scroll_test.lua      # scroll-preservation on refocus
 nvim --headless -l tests/toggle_view_test.lua # scroll/cursor preserved across toggle
 nvim --headless -l tests/toggle_insert_test.lua # insert mode follows hidden output
+nvim --headless -l tests/return_focus_test.lua # collapse returns to the originating window
 nvim --headless -l tests/send_selection_test.lua # line reference + reveal on send
 nvim --headless -l tests/switch_test.lua      # shared toggle + agent switching
 nvim --headless -l tests/remember_active_test.lua # per-directory active agent
